@@ -1,45 +1,44 @@
+const crypto = require("crypto");
 const db = require("../config/database");
 
+// Peserta undian: tamu yang punya kode, belum pernah menang,
+// dan bukan dari sekolah dengan keyword "Undangan"
+const PESERTA_QUERY = `
+  SELECT
+    bt.id,
+    bt.kode,
+    bt.nama_lengkap,
+    bt.foto,
+    ms.nama_sekolah,
+    bt.other_instansi
+  FROM buku_tamu bt
+  LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
+  WHERE bt.kode IS NOT NULL AND bt.kode <> ''
+    AND NOT EXISTS (SELECT 1 FROM wheel_spin ws WHERE ws.tamu_id = bt.id)
+    AND (ms.nama_sekolah NOT LIKE '%Undangan%' OR ms.nama_sekolah IS NULL)
+  ORDER BY bt.created_at DESC`;
+
+const getPeserta = async () => {
+  const [tamu] = await db.query(PESERTA_QUERY);
+  return tamu;
+};
+
+// Kunci sederhana agar dua spin tidak berjalan bersamaan (mis. klik ganda)
+let spinInProgress = false;
+
 // Get halaman wheel spin (admin)
-const getWheelPage = async (req, res) => {
-  try {
-    res.render("admin/wheel-spin", {
-      title: "Lucky Wheel Spin - Undian Berhadiah",
-      layout: "layout",
-      currentPage: "wheel-spin",
-    });
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).render("error", {
-      title: "Error",
-      error: { message: "Terjadi kesalahan saat memuat halaman" },
-    });
-  }
+const getWheelPage = (req, res) => {
+  res.render("admin/wheel-spin", {
+    title: "Lucky Wheel Spin - Undian Berhadiah",
+    layout: "layout",
+    currentPage: "wheel-spin",
+  });
 };
 
 // API: Get data untuk wheel spin
 const getWheelData = async (req, res) => {
   try {
-    // Ambil semua data tamu yang memiliki kode DAN belum pernah menang
-    // Exclude tamu yang sudah ada di table wheel_spin
-    // Exclude tamu dari sekolah dengan keyword "Undangan"
-    const [tamu] = await db.query(
-      `SELECT 
-        bt.id,
-        bt.kode, 
-        bt.nama_lengkap, 
-        bt.foto,
-        ms.nama_sekolah,
-        bt.other_instansi
-      FROM buku_tamu bt
-      LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-      WHERE bt.kode IS NOT NULL
-        AND bt.id NOT IN (
-          SELECT tamu_id FROM wheel_spin
-        )
-        AND (ms.nama_sekolah NOT LIKE '%Undangan%' OR ms.nama_sekolah IS NULL)
-      ORDER BY bt.created_at DESC`
-    );
+    const tamu = await getPeserta();
 
     res.json({
       success: true,
@@ -57,26 +56,16 @@ const getWheelData = async (req, res) => {
 
 // API: Putar wheel dan pilih pemenang acak
 const spinWheel = async (req, res) => {
+  if (spinInProgress) {
+    return res.status(409).json({
+      success: false,
+      message: "Undian sedang berlangsung, tunggu sebentar",
+    });
+  }
+
+  spinInProgress = true;
   try {
-    // Ambil semua data tamu yang memiliki kode DAN belum pernah menang
-    // Exclude tamu dari sekolah dengan keyword "Undangan"
-    const [tamu] = await db.query(
-      `SELECT 
-        bt.id,
-        bt.kode, 
-        bt.nama_lengkap, 
-        bt.foto,
-        ms.nama_sekolah,
-        bt.other_instansi
-      FROM buku_tamu bt
-      LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-      WHERE bt.kode IS NOT NULL
-        AND bt.id NOT IN (
-          SELECT tamu_id FROM wheel_spin
-        )
-        AND (ms.nama_sekolah NOT LIKE '%Undangan%' OR ms.nama_sekolah IS NULL)
-      ORDER BY bt.created_at DESC`
-    );
+    const tamu = await getPeserta();
 
     if (tamu.length === 0) {
       return res.status(400).json({
@@ -85,18 +74,13 @@ const spinWheel = async (req, res) => {
       });
     }
 
-    // Pilih pemenang secara acak
-    const randomIndex = Math.floor(Math.random() * tamu.length);
+    // Pilih pemenang secara acak (CSPRNG, distribusi merata)
+    const randomIndex = crypto.randomInt(tamu.length);
     const winner = tamu[randomIndex];
 
-    // INSERT data pemenang ke table wheel_spin
-    await db.query(
-      `INSERT INTO wheel_spin (tamu_id, created_at) VALUES (?, NOW())`,
-      [winner.id]
-    );
-
-    // Hitung index untuk animasi (posisi pada wheel)
-    const winnerPosition = randomIndex;
+    await db.query(`INSERT INTO wheel_spin (tamu_id, created_at) VALUES (?, NOW())`, [
+      winner.id,
+    ]);
 
     res.json({
       success: true,
@@ -107,7 +91,7 @@ const spinWheel = async (req, res) => {
         foto: winner.foto,
         nama_sekolah: winner.nama_sekolah,
         other_instansi: winner.other_instansi,
-        position: winnerPosition,
+        position: randomIndex,
       },
       totalParticipants: tamu.length,
     });
@@ -117,6 +101,8 @@ const spinWheel = async (req, res) => {
       success: false,
       message: "Gagal melakukan undian",
     });
+  } finally {
+    spinInProgress = false;
   }
 };
 
@@ -124,7 +110,7 @@ const spinWheel = async (req, res) => {
 const getWinnerHistory = async (req, res) => {
   try {
     const [winners] = await db.query(
-      `SELECT 
+      `SELECT
         ws.id,
         ws.tamu_id,
         ws.created_at,

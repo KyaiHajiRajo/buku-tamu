@@ -1,87 +1,90 @@
 const db = require("../config/database");
+const { withTransaction } = require("../config/database");
 const bcrypt = require("bcrypt");
 const xlsx = require("xlsx");
-const { decodeAndSaveBase64 } = require("../utils/imageHelper");
+const { decodeAndSaveBase64, deletePhoto } = require("../utils/imageHelper");
+const { buatKode } = require("../utils/kode");
 const {
   getClientStatus,
   getQRCode,
   logoutClient,
 } = require("../utils/whatsapp");
 
-// GET Login page
-const getLogin = (req, res) => {
-  // If user is already logged in and not accessing with success parameter, redirect to dashboard
-  if (req.session.isAuthenticated && !req.query.success) {
-    return res.redirect("/admin/dashboard");
-  }
+// Hash dummy agar waktu respons login sama walau username tidak ada
+const DUMMY_HASH = bcrypt.hashSync("dummy-password-for-timing", 10);
 
-  // If this is a success redirect (after successful login), show toast and redirect to dashboard
-  if (req.session.isAuthenticated && req.query.success === "login") {
-    req.session.flashSuccess = "Login berhasil! Selamat datang kembali.";
-    // Redirect to dashboard after setting flash message
-    return res.redirect("/admin/dashboard");
-  }
+const PER_PAGE = 30;
 
+// Parse id angka positif dari parameter, null jika tidak valid
+const parseId = (value) => {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+
+// Filter sekolah: "all" atau id angka
+const parseSchoolFilter = (value) => parseId(value) || "all";
+
+const renderLogin = (res, error = null) =>
   res.render("admin/login", {
     title: "Login Admin - Buku Tamu Digital",
-    error: null,
+    error,
   });
+
+// GET Login page
+const getLogin = (req, res) => {
+  if (req.session.isAuthenticated) {
+    return res.redirect("/admin/dashboard");
+  }
+  renderLogin(res);
 };
 
 // POST Login
 const postLogin = async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const username = String(req.body.username || "").trim();
+    const password = String(req.body.password || "");
 
     // Validasi input
     if (!username || !password) {
-      return res.render("admin/login", {
-        title: "Login Admin - Buku Tamu Digital",
-        error: "Username dan password harus diisi!",
-      });
+      return renderLogin(res, "Username dan password harus diisi!");
     }
 
     // Cari user di database - bisa pakai name ATAU whatsapp
     const [users] = await db.query(
-      "SELECT * FROM super_admin WHERE name = ? OR whatsapp = ?",
+      "SELECT id, name, whatsapp, password FROM super_admin WHERE name = ? OR whatsapp = ? LIMIT 1",
       [username, username]
     );
 
-    if (users.length === 0) {
-      return res.render("admin/login", {
-        title: "Login Admin - Buku Tamu Digital",
-        error: "Username atau password salah!",
-      });
-    }
-
     const user = users[0];
+    const isValidPassword = await bcrypt.compare(
+      password.slice(0, 72),
+      user ? user.password : DUMMY_HASH
+    );
 
-    // Verifikasi password
-    const isValidPassword = await bcrypt.compare(password, user.password);
-
-    if (!isValidPassword) {
-      return res.render("admin/login", {
-        title: "Login Admin - Buku Tamu Digital",
-        error: "Username atau password salah!",
-      });
+    if (!user || !isValidPassword) {
+      return renderLogin(res, "Username atau password salah!");
     }
 
-    // Set session
-    req.session.isAuthenticated = true;
-    req.session.user = {
-      id: user.id,
-      name: user.name,
-      whatsapp: user.whatsapp,
-    };
+    // Buat session baru untuk mencegah session fixation
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error("Error regenerate session:", err);
+        return renderLogin(res, "Terjadi kesalahan server. Silakan coba lagi.");
+      }
 
-    // Redirect to login with success parameter to show toast notification
-    res.redirect("/admin/login?success=login");
+      req.session.isAuthenticated = true;
+      req.session.user = {
+        id: user.id,
+        name: user.name,
+        whatsapp: user.whatsapp,
+      };
+      req.session.flashSuccess = "Login berhasil! Selamat datang kembali.";
+
+      req.session.save(() => res.redirect("/admin/dashboard"));
+    });
   } catch (error) {
     console.error("Error login:", error);
-    res.render("admin/login", {
-      title: "Login Admin - Buku Tamu Digital",
-      error: "Terjadi kesalahan server. Silakan coba lagi.",
-    });
+    renderLogin(res, "Terjadi kesalahan server. Silakan coba lagi.");
   }
 };
 
@@ -91,6 +94,7 @@ const logout = (req, res) => {
     if (err) {
       console.error("Error logout:", err);
     }
+    res.clearCookie(req.app.get("sessionCookieName"));
     res.redirect("/admin/login");
   });
 };
@@ -98,50 +102,44 @@ const logout = (req, res) => {
 // Dashboard
 const getDashboard = async (req, res) => {
   try {
-    // Get total tamu hari ini
-    const [todayCount] = await db.query(
-      "SELECT COUNT(*) as count FROM buku_tamu WHERE DATE(created_at) = CURDATE()"
-    );
-
-    // Get total tamu keseluruhan
-    const [totalCount] = await db.query(
-      "SELECT COUNT(*) as count FROM buku_tamu"
-    );
-
-    // Get total sekolah
-    const [schoolCount] = await db.query(
-      "SELECT COUNT(*) as count FROM master_sekolah"
-    );
-
-    // Get statistik per sekolah (jumlah tamu per sekolah)
-    const [schoolStats] = await db.query(`
-      SELECT 
-        ms.id,
-        ms.nama_sekolah,
-        COUNT(bt.id) as jumlah_tamu,
-        MAX(bt.created_at) as last_visit
-      FROM master_sekolah ms
-      LEFT JOIN buku_tamu bt ON ms.id = bt.sekolah_id
-      GROUP BY ms.id, ms.nama_sekolah
-      ORDER BY jumlah_tamu DESC, ms.nama_sekolah ASC
-    `);
-
-    // Get recent guests (5 terbaru)
-    const [recentGuests] = await db.query(`
-            SELECT bt.*, ms.nama_sekolah 
-            FROM buku_tamu bt
-            LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-            ORDER BY bt.created_at DESC
-            LIMIT 5
-        `);
+    const [[stats], [schoolStats], [recentGuests]] = await Promise.all([
+      db.query(`
+        SELECT
+          (SELECT COUNT(*) FROM buku_tamu
+            WHERE created_at >= CURDATE() AND created_at < CURDATE() + INTERVAL 1 DAY) AS today,
+          (SELECT COUNT(*) FROM buku_tamu) AS total,
+          (SELECT COUNT(*) FROM master_sekolah) AS schools
+      `),
+      // Statistik per sekolah (jumlah tamu per sekolah)
+      db.query(`
+        SELECT
+          ms.id,
+          ms.nama_sekolah,
+          COUNT(bt.id) as jumlah_tamu,
+          MAX(bt.created_at) as last_visit
+        FROM master_sekolah ms
+        LEFT JOIN buku_tamu bt ON ms.id = bt.sekolah_id
+        GROUP BY ms.id, ms.nama_sekolah
+        ORDER BY jumlah_tamu DESC, ms.nama_sekolah ASC
+      `),
+      // Tamu terbaru (5 terakhir)
+      db.query(`
+        SELECT bt.id, bt.nama_lengkap, bt.nomor_wa, bt.kode,
+               bt.other_instansi, bt.created_at, ms.nama_sekolah
+        FROM buku_tamu bt
+        LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
+        ORDER BY bt.created_at DESC
+        LIMIT 5
+      `),
+    ]);
 
     res.render("admin/dashboard", {
       title: "Dashboard Admin",
       currentPage: "dashboard",
       stats: {
-        today: todayCount[0].count,
-        total: totalCount[0].count,
-        schools: schoolCount[0].count,
+        today: stats[0].today,
+        total: stats[0].total,
+        schools: stats[0].schools,
       },
       schoolStats,
       recentGuests,
@@ -178,19 +176,23 @@ const getMasterSekolah = async (req, res) => {
   }
 };
 
+// Validasi nama sekolah dari form
+const cleanNamaSekolah = (value) =>
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+
 // Master Sekolah - CREATE
 const createSekolah = async (req, res) => {
   try {
-    const { nama_sekolah } = req.body;
+    const namaSekolah = cleanNamaSekolah(req.body.nama_sekolah);
 
-    if (!nama_sekolah) {
+    if (!namaSekolah || namaSekolah.length > 150) {
       return res.redirect(
-        "/admin/master-sekolah?error=Nama sekolah harus diisi"
+        "/admin/master-sekolah?error=Nama sekolah harus diisi (maksimal 150 karakter)"
       );
     }
 
     await db.query("INSERT INTO master_sekolah (nama_sekolah) VALUES (?)", [
-      nama_sekolah,
+      namaSekolah,
     ]);
 
     res.redirect(
@@ -207,17 +209,17 @@ const createSekolah = async (req, res) => {
 // Master Sekolah - UPDATE
 const updateSekolah = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { nama_sekolah } = req.body;
+    const id = parseId(req.params.id);
+    const namaSekolah = cleanNamaSekolah(req.body.nama_sekolah);
 
-    if (!nama_sekolah) {
+    if (!id || !namaSekolah || namaSekolah.length > 150) {
       return res.redirect(
-        "/admin/master-sekolah?error=Nama sekolah harus diisi"
+        "/admin/master-sekolah?error=Nama sekolah harus diisi (maksimal 150 karakter)"
       );
     }
 
     await db.query("UPDATE master_sekolah SET nama_sekolah = ? WHERE id = ?", [
-      nama_sekolah,
+      namaSekolah,
       id,
     ]);
 
@@ -235,7 +237,10 @@ const updateSekolah = async (req, res) => {
 // Master Sekolah - DELETE
 const deleteSekolah = async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
+    if (!id) {
+      return res.redirect("/admin/master-sekolah?error=Data tidak valid");
+    }
 
     // Cek apakah ada tamu yang terdaftar dari sekolah ini
     const [guests] = await db.query(
@@ -263,107 +268,78 @@ const deleteSekolah = async (req, res) => {
 // Data Tamu - GET
 const getDataTamu = async (req, res) => {
   try {
-    const selectedSchool = req.query.sekolah || "all";
-    const page = parseInt(req.query.page) || 1;
-    const limit = 30; // 30 data per halaman
+    const selectedSchool = parseSchoolFilter(req.query.sekolah);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = PER_PAGE;
     const offset = (page - 1) * limit;
 
-    // Get all schools for filter
-    const [schools] = await db.query(
-      "SELECT * FROM master_sekolah ORDER BY nama_sekolah ASC"
-    );
+    const whereClause = selectedSchool !== "all" ? " WHERE bt.sekolah_id = ?" : "";
+    const filterParams = selectedSchool !== "all" ? [selectedSchool] : [];
 
-    // Build base query for counting total records
-    let countQuery = `
-            SELECT COUNT(*) as total
-            FROM buku_tamu bt
-            LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-        `;
+    const [[schools], [countResult], [guests], [schoolStats], [checks]] =
+      await Promise.all([
+        // Semua sekolah untuk filter
+        db.query("SELECT id, nama_sekolah FROM master_sekolah ORDER BY nama_sekolah ASC"),
+        // Total data untuk pagination
+        db.query(`SELECT COUNT(*) as total FROM buku_tamu bt${whereClause}`, filterParams),
+        // Data per halaman
+        db.query(
+          `SELECT bt.id, bt.sekolah_id, bt.other_instansi, bt.nama_lengkap, bt.nomor_wa,
+                  bt.foto, bt.kode, bt.created_at, ms.nama_sekolah
+           FROM buku_tamu bt
+           LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
+           ${whereClause}
+           ORDER BY bt.created_at DESC
+           LIMIT ? OFFSET ?`,
+          [...filterParams, limit, offset]
+        ),
+        // Statistik per sekolah
+        db.query(`
+          SELECT
+            ms.id,
+            ms.nama_sekolah,
+            COUNT(bt.id) as total_tamu,
+            COUNT(CASE WHEN bt.created_at >= CURDATE() THEN 1 END) as tamu_hari_ini,
+            MAX(bt.created_at) as kunjungan_terakhir
+          FROM master_sekolah ms
+          LEFT JOIN buku_tamu bt ON ms.id = bt.sekolah_id
+          GROUP BY ms.id, ms.nama_sekolah
+          ORDER BY total_tamu DESC, ms.nama_sekolah ASC
+        `),
+        // Kondisi tombol generate kode & migrasi foto
+        db.query(`
+          SELECT
+            COALESCE(SUM(kode IS NULL OR kode = ''), 0) AS count_without_kode,
+            COALESCE(SUM(foto LIKE 'data:image%'), 0) AS count_base64_photos
+          FROM buku_tamu
+        `),
+      ]);
 
-    // Build query for getting paginated data
-    let query = `
-            SELECT bt.*, ms.nama_sekolah, bt.other_instansi 
-            FROM buku_tamu bt
-            LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-        `;
-
-    let params = [];
-    let countParams = [];
-
-    if (selectedSchool !== "all") {
-      const whereClause = " WHERE bt.sekolah_id = ?";
-      query += whereClause;
-      countQuery += whereClause;
-      params.push(selectedSchool);
-      countParams.push(selectedSchool);
-    }
-
-    query += " ORDER BY bt.created_at DESC LIMIT ? OFFSET ?";
-    params.push(limit, offset);
-
-    // Get total count for pagination
-    const [countResult] = await db.query(countQuery, countParams);
     const totalRecords = countResult[0].total;
     const totalPages = Math.ceil(totalRecords / limit);
-
-    // Get paginated data
-    const [guests] = await db.query(query, params);
-
-    // Get statistics per school
-    const [schoolStats] = await db.query(`
-            SELECT 
-                ms.id,
-                ms.nama_sekolah,
-                COUNT(bt.id) as total_tamu,
-                COUNT(CASE WHEN DATE(bt.created_at) = CURDATE() THEN 1 END) as tamu_hari_ini,
-                MAX(bt.created_at) as kunjungan_terakhir
-            FROM master_sekolah ms
-            LEFT JOIN buku_tamu bt ON ms.id = bt.sekolah_id
-            GROUP BY ms.id, ms.nama_sekolah
-            ORDER BY total_tamu DESC, ms.nama_sekolah ASC
-        `);
-
-    // Check conditions for button states
-    const [generateKodeCheck] = await db.query(`
-            SELECT COUNT(*) as count_without_kode
-            FROM buku_tamu 
-            WHERE kode IS NULL OR kode = ''
-        `);
-
-    const [migratePhotoCheck] = await db.query(`
-            SELECT COUNT(*) as count_base64_photos
-            FROM buku_tamu 
-            WHERE foto IS NOT NULL 
-            AND foto != '' 
-            AND foto LIKE 'data:image%'
-        `);
-
-    const hasDataWithoutKode = generateKodeCheck[0].count_without_kode > 0;
-    const hasBase64Photos = migratePhotoCheck[0].count_base64_photos > 0;
 
     res.render("admin/data-tamu", {
       title: "Data Tamu",
       // For sidebar active state
       currentPage: "data-tamu",
-      // Keep the original name available if other parts rely on it
       currentPageName: "data-tamu",
       guests,
       schools,
       schoolStats,
-      selectedSchool,
+      selectedSchool: String(selectedSchool),
       success: req.query.success || null,
       error: req.query.error || null,
-      session: req.session, // Tambahkan session untuk admin info
+      session: req.session,
       // Pagination data
       currentPageNumber: page,
       totalPages: totalPages,
       totalRecords: totalRecords,
       limit: limit,
-      startRecord: offset + 1,
+      startRecord: totalRecords === 0 ? 0 : offset + 1,
       endRecord: Math.min(offset + limit, totalRecords),
       // Button states
-      hasDataWithoutKode: hasDataWithoutKode,
-      hasBase64Photos: hasBase64Photos,
+      hasDataWithoutKode: Number(checks[0].count_without_kode) > 0,
+      hasBase64Photos: Number(checks[0].count_base64_photos) > 0,
     });
   } catch (error) {
     console.error("Error get data tamu:", error);
@@ -377,9 +353,20 @@ const getDataTamu = async (req, res) => {
 // Data Tamu - DELETE
 const deleteTamu = async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
+    if (!id) {
+      return res.redirect("/admin/data-tamu?error=Data tidak valid");
+    }
 
-    await db.query("DELETE FROM buku_tamu WHERE id = ?", [id]);
+    // Hapus riwayat undian dulu agar tidak terhalang foreign key
+    const foto = await withTransaction(async (conn) => {
+      const [rows] = await conn.query("SELECT foto FROM buku_tamu WHERE id = ?", [id]);
+      await conn.query("DELETE FROM wheel_spin WHERE tamu_id = ?", [id]);
+      await conn.query("DELETE FROM buku_tamu WHERE id = ?", [id]);
+      return rows[0] ? rows[0].foto : null;
+    });
+
+    await deletePhoto(foto);
 
     res.redirect("/admin/data-tamu?success=Data tamu berhasil dihapus");
   } catch (error) {
@@ -393,32 +380,28 @@ const deleteTamu = async (req, res) => {
 // Export Excel
 const exportExcel = async (req, res) => {
   try {
-    // Get filter parameter same as in getDataTamu
-    const selectedSchool = req.query.sekolah || "all";
+    const selectedSchool = parseSchoolFilter(req.query.sekolah);
 
-    // Build base query with same filtering logic as getDataTamu
     let query = `
-            SELECT 
-                bt.id,
-                bt.kode,
-                ms.nama_sekolah,
-                bt.other_instansi,
-                bt.nama_lengkap,
-                bt.nomor_wa,
-                bt.created_at
-            FROM buku_tamu bt
-            LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
-        `;
+      SELECT
+        bt.id,
+        bt.kode,
+        ms.nama_sekolah,
+        bt.other_instansi,
+        bt.nama_lengkap,
+        bt.nomor_wa,
+        bt.created_at
+      FROM buku_tamu bt
+      LEFT JOIN master_sekolah ms ON bt.sekolah_id = ms.id
+    `;
 
-    let params = [];
+    const params = [];
     let schoolName = "Semua_Sekolah";
 
-    // Apply filter if specific school selected
     if (selectedSchool !== "all") {
       query += " WHERE bt.sekolah_id = ?";
       params.push(selectedSchool);
 
-      // Get school name for filename
       const [schoolData] = await db.query(
         "SELECT nama_sekolah FROM master_sekolah WHERE id = ?",
         [selectedSchool]
@@ -430,10 +413,8 @@ const exportExcel = async (req, res) => {
 
     query += " ORDER BY bt.created_at DESC";
 
-    // Execute query with parameters
     const [guests] = await db.query(query, params);
 
-    // Prepare data for Excel
     const excelData = guests.map((guest, index) => ({
       No: index + 1,
       "Kode Tamu": guest.kode || "-",
@@ -451,11 +432,9 @@ const exportExcel = async (req, res) => {
       }),
     }));
 
-    // Create workbook and worksheet
     const wb = xlsx.utils.book_new();
     const ws = xlsx.utils.json_to_sheet(excelData);
 
-    // Set column widths
     ws["!cols"] = [
       { wch: 5 }, // No
       { wch: 12 }, // Kode Tamu
@@ -466,42 +445,30 @@ const exportExcel = async (req, res) => {
       { wch: 22 }, // Tanggal Daftar
     ];
 
-    // Add worksheet to workbook
     xlsx.utils.book_append_sheet(wb, ws, "Data Tamu");
 
-    // Generate buffer
     const excelBuffer = xlsx.write(wb, { type: "buffer", bookType: "xlsx" });
 
-    // Create filename with timestamp and school filter
-    const now = new Date();
-    const timestamp = now
+    const timestamp = new Date()
       .toISOString()
       .replace(/T/, "_")
       .replace(/\..+/, "")
       .replace(/:/g, "-");
 
-    // Include school name in filename if filtered
     const filename =
       selectedSchool !== "all"
         ? `Data_Tamu_${schoolName}_${timestamp}.xlsx`
         : `Data_Tamu_${timestamp}.xlsx`;
 
-    // Clear any existing headers and set new ones
-    res.removeHeader("Content-Type");
-    res.removeHeader("Content-Disposition");
-    res.removeHeader("Content-Length");
-
-    // Set response headers for Excel download
     res.status(200);
     res.set({
       "Content-Type":
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "Content-Disposition": `attachment; filename="${filename}"`,
       "Content-Length": excelBuffer.length,
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-store",
     });
 
-    // Send the Excel file
     return res.end(excelBuffer);
   } catch (error) {
     console.error("Error export Excel:", error);
@@ -515,7 +482,7 @@ const exportExcel = async (req, res) => {
 const getTamuWithoutKode = async (req, res) => {
   try {
     const [tamu] = await db.query(
-      `SELECT 
+      `SELECT
         bt.id,
         bt.nama_lengkap,
         ms.nama_sekolah,
@@ -543,19 +510,20 @@ const getTamuWithoutKode = async (req, res) => {
 // Generate kode untuk tamu tertentu atau semua
 const generateKode = async (req, res) => {
   try {
-    const { tamuIds, autoGenerate } = req.body;
+    const { tamuIds, autoGenerate } = req.body || {};
 
     let query;
     let params = [];
 
-    if (autoGenerate) {
-      // Generate untuk semua tamu yang belum punya kode
+    if (autoGenerate === true) {
       query = `SELECT id, nama_lengkap FROM buku_tamu WHERE kode IS NULL OR kode = ''`;
-    } else if (tamuIds && tamuIds.length > 0) {
-      // Generate untuk tamu yang dipilih
-      const placeholders = tamuIds.map(() => "?").join(",");
-      query = `SELECT id, nama_lengkap FROM buku_tamu WHERE id IN (${placeholders})`;
-      params = tamuIds;
+    } else if (Array.isArray(tamuIds) && tamuIds.length > 0) {
+      const ids = [...new Set(tamuIds.map(parseId).filter(Boolean))].slice(0, 1000);
+      if (ids.length === 0) {
+        return res.status(400).json({ success: false, message: "Data tidak valid" });
+      }
+      query = `SELECT id, nama_lengkap FROM buku_tamu WHERE id IN (?)`;
+      params = [ids];
     } else {
       return res.status(400).json({
         success: false,
@@ -573,30 +541,19 @@ const generateKode = async (req, res) => {
       });
     }
 
-    // Generate kode untuk setiap tamu
-    let updatedCount = 0;
-    for (const tamu of tamuList) {
-      // Ambil inisial dari nama
-      const words = tamu.nama_lengkap.trim().split(/\s+/);
-      const inisial = words
-        .map((word) => word.charAt(0).toUpperCase())
-        .join("");
-
-      // Format kode: [Inisial][01][ID 2 digit]
-      const kode = `${inisial}01${tamu.id.toString().padStart(2, "0")}`;
-
-      // Update kode
-      await db.query("UPDATE buku_tamu SET kode = ? WHERE id = ?", [
-        kode,
-        tamu.id,
-      ]);
-      updatedCount++;
-    }
+    await withTransaction(async (conn) => {
+      for (const tamu of tamuList) {
+        await conn.query("UPDATE buku_tamu SET kode = ? WHERE id = ?", [
+          buatKode(tamu.nama_lengkap, tamu.id),
+          tamu.id,
+        ]);
+      }
+    });
 
     res.json({
       success: true,
-      message: `Berhasil generate kode untuk ${updatedCount} tamu`,
-      updated: updatedCount,
+      message: `Berhasil generate kode untuk ${tamuList.length} tamu`,
+      updated: tamuList.length,
     });
   } catch (error) {
     console.error("Error generate kode:", error);
@@ -610,15 +567,9 @@ const generateKode = async (req, res) => {
 // Migration: Convert Base64 photos to files
 const migratePhotos = async (req, res) => {
   try {
-    console.log("Starting photo migration...");
-
-    // Get all records with base64 photos (not yet migrated)
+    // Ambil id saja dulu agar foto base64 besar tidak dimuat sekaligus
     const [guests] = await db.query(
-      `SELECT id, foto FROM buku_tamu 
-       WHERE foto IS NOT NULL 
-       AND foto != '' 
-       AND foto NOT LIKE '/uploads/%'
-       AND foto NOT LIKE 'uploads/%'`
+      `SELECT id FROM buku_tamu WHERE foto LIKE 'data:image%'`
     );
 
     if (guests.length === 0) {
@@ -631,49 +582,31 @@ const migratePhotos = async (req, res) => {
       });
     }
 
-    console.log(`Found ${guests.length} photos to migrate`);
-
     let migratedCount = 0;
-    let failedCount = 0;
     const failedIds = [];
 
-    // Loop through each guest and convert base64 to file
-    for (const guest of guests) {
+    for (const { id } of guests) {
       try {
-        console.log(`Processing guest ID: ${guest.id}`);
-
-        // Convert base64 to file and get path
-        const filePath = decodeAndSaveBase64(guest.foto);
+        const [rows] = await db.query("SELECT foto FROM buku_tamu WHERE id = ?", [id]);
+        const filePath = rows[0] ? await decodeAndSaveBase64(rows[0].foto) : null;
 
         if (filePath) {
-          // Update database with new file path
-          await db.query("UPDATE buku_tamu SET foto = ? WHERE id = ?", [
-            filePath,
-            guest.id,
-          ]);
-
+          await db.query("UPDATE buku_tamu SET foto = ? WHERE id = ?", [filePath, id]);
           migratedCount++;
-          console.log(`✅ Guest ID ${guest.id} migrated successfully`);
         } else {
-          failedCount++;
-          failedIds.push(guest.id);
-          console.error(`❌ Failed to migrate guest ID ${guest.id}`);
+          failedIds.push(id);
         }
       } catch (error) {
-        failedCount++;
-        failedIds.push(guest.id);
-        console.error(`Error migrating guest ID ${guest.id}:`, error.message);
+        failedIds.push(id);
+        console.error(`Error migrating guest ID ${id}:`, error.message);
       }
     }
 
-    console.log("Migration completed!");
-    console.log(`Migrated: ${migratedCount}, Failed: ${failedCount}`);
-
     res.json({
       success: true,
-      message: `Migrasi selesai! Berhasil: ${migratedCount}, Gagal: ${failedCount}`,
+      message: `Migrasi selesai! Berhasil: ${migratedCount}, Gagal: ${failedIds.length}`,
       migrated: migratedCount,
-      failed: failedCount,
+      failed: failedIds.length,
       failedIds: failedIds,
       total: guests.length,
     });
@@ -682,26 +615,8 @@ const migratePhotos = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan saat migrasi foto",
-      error: error.message,
     });
   }
-};
-
-module.exports = {
-  getLogin,
-  postLogin,
-  logout,
-  getDashboard,
-  getMasterSekolah,
-  createSekolah,
-  updateSekolah,
-  deleteSekolah,
-  getDataTamu,
-  deleteTamu,
-  exportExcel,
-  getTamuWithoutKode,
-  generateKode,
-  migratePhotos,
 };
 
 // ============================================
@@ -709,42 +624,21 @@ module.exports = {
 // ============================================
 
 // GET WhatsApp Settings Page
-const getWhatsAppSettings = async (req, res) => {
-  try {
-    const status = getClientStatus();
-
-    res.render("admin/whatsapp-settings", {
-      title: "WhatsApp Settings",
-      currentPage: "whatsapp-settings",
-      whatsappStatus: status,
-    });
-  } catch (error) {
-    console.error("Error get WhatsApp settings:", error);
-    res.status(500).render("error", {
-      title: "Error",
-      error: { message: "Terjadi kesalahan saat memuat halaman WhatsApp" },
-    });
-  }
+const getWhatsAppSettings = (req, res) => {
+  res.render("admin/whatsapp-settings", {
+    title: "WhatsApp Settings",
+    currentPage: "whatsapp-settings",
+    whatsappStatus: getClientStatus(),
+  });
 };
 
 // API: Get WhatsApp Status and QR Code
-const getWhatsAppStatus = async (req, res) => {
-  try {
-    const status = getClientStatus();
-    const qrCode = getQRCode();
-
-    res.json({
-      success: true,
-      status: status,
-      qrCode: qrCode,
-    });
-  } catch (error) {
-    console.error("Error get WhatsApp status:", error);
-    res.status(500).json({
-      success: false,
-      message: "Terjadi kesalahan saat mengambil status WhatsApp",
-    });
-  }
+const getWhatsAppStatus = (req, res) => {
+  res.json({
+    success: true,
+    status: getClientStatus(),
+    qrCode: getQRCode(),
+  });
 };
 
 // API: Logout WhatsApp Client

@@ -5,20 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title><%= title %></title>
 
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/css/tailwind.css" />
 
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              primary: "#6184D6",
-              "primary-dark": "#4B6BB5",
-            },
-          },
-        },
-      };
-    </script>
 
     <link
       rel="stylesheet"
@@ -495,10 +483,10 @@
 
           // Fallback to EJS values if URL params not available
           if (!actualKode) {
-            actualKode = "<%= kode %>" || "ERROR";
+            actualKode = <%- JSON.stringify(kode || "").replace(/</g, "\\u003c") %> || "ERROR";
           }
           if (!actualNama) {
-            actualNama = "<%= nama_lengkap %>" || "Nama Error";
+            actualNama = <%- JSON.stringify(nama_lengkap || "").replace(/</g, "\\u003c") %> || "Nama Error";
           } else {
             actualNama = decodeURIComponent(actualNama);
           }
@@ -620,7 +608,7 @@
               !kodeElement.textContent ||
               kodeElement.textContent.trim() === ""
             ) {
-              kodeElement.textContent = "<%= kode %>";
+              kodeElement.textContent = <%- JSON.stringify(kode || "").replace(/</g, "\\u003c") %>;
             }
           }
 

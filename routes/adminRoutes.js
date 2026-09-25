@@ -3,13 +3,32 @@ const router = express.Router();
 const adminController = require("../controllers/adminController");
 const wheelController = require("../controllers/wheelController");
 const { isAuthenticated, isNotAuthenticated } = require("../middleware/auth");
+const { rateLimit, csrfProtection } = require("../middleware/security");
+
+// Maks 10 percobaan login per 15 menit per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Terlalu banyak percobaan login. Coba lagi dalam 15 menit.",
+  onLimit: (req, res, message) =>
+    res.render("admin/login", { title: "Login Admin - Buku Tamu Digital", error: message }),
+});
+
+// Halaman admin tidak boleh di-cache browser/proxy
+router.use((req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+
+// Semua request POST admin wajib membawa token CSRF
+router.use(csrfProtection);
 
 // Login routes (tanpa autentikasi)
 router.get("/login", isNotAuthenticated, adminController.getLogin);
-router.post("/login", isNotAuthenticated, adminController.postLogin);
+router.post("/login", loginLimiter, isNotAuthenticated, adminController.postLogin);
 
 // Logout
-router.get("/logout", adminController.logout);
+router.post("/logout", adminController.logout);
 
 // Dashboard (dengan autentikasi)
 router.get("/", isAuthenticated, (req, res) =>

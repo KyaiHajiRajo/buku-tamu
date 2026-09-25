@@ -1,6 +1,14 @@
 const db = require("../config/database");
-const { saveBase64Image } = require("../utils/imageHelper");
+const { withTransaction } = require("../config/database");
+const { saveBase64Image, deletePhoto } = require("../utils/imageHelper");
 const { sendWhatsAppMessage } = require("../utils/whatsapp");
+const { buatKode } = require("../utils/kode");
+
+// Huruf (termasuk beraksen), angka, spasi dan tanda baca umum pada nama
+const NAMA_PATTERN = /^[\p{L}\p{M}\p{N} .,'’()\-/&]+$/u;
+
+const cleanText = (value) =>
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
 
 // Get form buku tamu
 const getForm = async (req, res) => {
@@ -24,86 +32,110 @@ const getForm = async (req, res) => {
   }
 };
 
-// Function untuk generate kode otomatis
-const generateKode = (namaLengkap) => {
-  // Ambil inisial dari nama (huruf depan setiap kata)
-  const words = namaLengkap.trim().split(/\s+/);
-  const inisial = words.map((word) => word.charAt(0).toUpperCase()).join("");
+// Validasi input form, return { data } atau { error }
+const validateSubmission = (body) => {
+  const sekolahId = Number(body.sekolah_id);
+  const namaLengkap = cleanText(body.nama_lengkap);
+  const otherInstansi = cleanText(body.other_instansi);
+  const nomorWa = String(body.nomor_wa || "").replace(/\D/g, "");
 
-  return inisial;
+  if (!Number.isInteger(sekolahId) || sekolahId <= 0) {
+    return { error: "Asal sekolah harus dipilih!" };
+  }
+  if (namaLengkap.length < 2 || namaLengkap.length > 100) {
+    return { error: "Nama lengkap harus 2-100 karakter!" };
+  }
+  if (!NAMA_PATTERN.test(namaLengkap)) {
+    return { error: "Nama lengkap mengandung karakter yang tidak diizinkan!" };
+  }
+  if (otherInstansi.length > 100 || (otherInstansi && !NAMA_PATTERN.test(otherInstansi))) {
+    return { error: "Nama instansi tidak valid (maksimal 100 karakter)!" };
+  }
+  if (nomorWa.length < 9 || nomorWa.length > 15) {
+    return { error: "Nomor WhatsApp harus 9-15 digit!" };
+  }
+  if (!body.foto) {
+    return { error: "Foto harus diambil!" };
+  }
+
+  return {
+    data: {
+      sekolahId,
+      namaLengkap,
+      otherInstansi: otherInstansi || null,
+      nomorWa,
+    },
+  };
 };
 
 // Submit buku tamu
 const submitForm = async (req, res) => {
-  try {
-    const { sekolah_id, other_instansi, nama_lengkap, nomor_wa, foto } =
-      req.body;
+  let fotoPath = null;
 
-    // Validasi input
-    if (!sekolah_id || !nama_lengkap || !nomor_wa || !foto) {
+  try {
+    const { data, error } = validateSubmission(req.body || {});
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    const [sekolah] = await db.query("SELECT id FROM master_sekolah WHERE id = ?", [
+      data.sekolahId,
+    ]);
+    if (sekolah.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Semua field harus diisi!",
+        message: "Asal sekolah tidak ditemukan!",
       });
     }
 
-    // Convert base64 to file path
-    const fotoPath = await saveBase64Image(foto);
-
+    // Simpan foto hanya setelah semua data valid
+    fotoPath = await saveBase64Image(req.body.foto);
     if (!fotoPath) {
       return res.status(400).json({
         success: false,
-        message: "Gagal menyimpan foto. Silakan coba lagi.",
+        message: "Foto tidak valid. Silakan ambil ulang foto (JPG/PNG, maks 3 MB).",
       });
     }
 
-    // Insert data ke database terlebih dahulu (tanpa kode, dengan path foto)
-    const [result] = await db.query(
-      "INSERT INTO buku_tamu (sekolah_id, other_instansi, nama_lengkap, nomor_wa, foto) VALUES (?, ?, ?, ?, ?)",
-      [sekolah_id, other_instansi || null, nama_lengkap, nomor_wa, fotoPath]
-    );
+    // Insert + generate kode dalam satu transaksi
+    const kode = await withTransaction(async (conn) => {
+      const [result] = await conn.query(
+        "INSERT INTO buku_tamu (sekolah_id, other_instansi, nama_lengkap, nomor_wa, foto) VALUES (?, ?, ?, ?, ?)",
+        [data.sekolahId, data.otherInstansi, data.namaLengkap, data.nomorWa, fotoPath]
+      );
 
-    // Ambil ID yang baru saja di-insert
-    const newId = result.insertId;
-
-    // Generate inisial dari nama
-    const inisial = generateKode(nama_lengkap);
-
-    // Format kode: [Inisial][01][ID 2 digit]
-    // Contoh: Dimas Putra dengan ID 5 → DP0105
-    const kode = `${inisial}01${newId.toString().padStart(2, "0")}`;
-
-    // Update kode berdasarkan ID
-    await db.query("UPDATE buku_tamu SET kode = ? WHERE id = ?", [kode, newId]);
+      const newKode = buatKode(data.namaLengkap, result.insertId);
+      await conn.query("UPDATE buku_tamu SET kode = ? WHERE id = ?", [
+        newKode,
+        result.insertId,
+      ]);
+      return newKode;
+    });
 
     // Kirim pesan WhatsApp (non-blocking)
     // Jangan biarkan error WhatsApp menghentikan proses utama
-    sendWhatsAppMessage(nomor_wa, nama_lengkap, kode)
+    sendWhatsAppMessage(data.nomorWa, data.namaLengkap, kode)
       .then((result) => {
         if (result.success) {
-          console.log(
-            `✅ WhatsApp notification sent to ${nama_lengkap} (${result.number})`
-          );
+          console.log(`✅ WhatsApp notification sent (${result.number})`);
         } else {
-          console.warn(
-            `⚠️ Failed to send WhatsApp to ${nama_lengkap}: ${result.message}`
-          );
+          console.warn(`⚠️ Failed to send WhatsApp: ${result.message}`);
         }
       })
-      .catch((error) => {
-        console.error(
-          `❌ WhatsApp error for ${nama_lengkap}: ${error.message}`
-        );
+      .catch((err) => {
+        console.error(`❌ WhatsApp error: ${err.message}`);
       });
 
     res.json({
       success: true,
       message: "Terima kasih! Data Anda telah tersimpan.",
       kode: kode,
-      nama_lengkap: nama_lengkap,
+      nama_lengkap: data.namaLengkap,
     });
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error submit buku tamu:", error);
+    // Jangan tinggalkan file yatim jika penyimpanan data gagal
+    if (fotoPath) await deletePhoto(fotoPath);
     res.status(500).json({
       success: false,
       message: "Terjadi kesalahan saat menyimpan data",
@@ -113,8 +145,8 @@ const submitForm = async (req, res) => {
 
 // Halaman sukses
 const successPage = (req, res) => {
-  const kode = req.query.kode || null;
-  const nama = req.query.nama || null;
+  const kode = /^[A-Z0-9]{1,15}$/.test(req.query.kode || "") ? req.query.kode : null;
+  const nama = cleanText(req.query.nama).slice(0, 100) || null;
 
   res.render("buku-tamu/success", {
     title: "Terima Kasih - Buku Tamu Digital",

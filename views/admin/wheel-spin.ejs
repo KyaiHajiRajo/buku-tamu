@@ -5,20 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title><%= title %></title>
 
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/css/tailwind.css" />
 
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              primary: "#6184D6",
-              "primary-dark": "#4B6BB5",
-            },
-          },
-        },
-      };
-    </script>
 
     <link
       rel="stylesheet"
@@ -816,11 +804,11 @@
                       ${index + 1}
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="font-semibold text-sm text-gray-800 truncate">${w.nama_lengkap}</p>
+                      <p class="font-semibold text-sm text-gray-800 truncate">${escapeHtml(w.nama_lengkap)}</p>
                       <div class="flex items-center gap-2 text-xs text-gray-600 mt-1">
-                        <span class="bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-semibold">${w.kode}</span>
-                        <span class="truncate" title="${w.nama_sekolah || '-'}">
-                          <i class="fas fa-school mr-1"></i>${w.nama_sekolah || '-'}
+                        <span class="bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-semibold">${escapeHtml(w.kode)}</span>
+                        <span class="truncate" title="${escapeHtml(w.nama_sekolah || '-')}">
+                          <i class="fas fa-school mr-1"></i>${escapeHtml(w.nama_sekolah || '-')}
                         </span>
                       </div>
                       <p class="text-xs text-gray-500 mt-1">
@@ -988,8 +976,8 @@
             <!-- Photo -->
             <div class="relative overflow-hidden bg-gradient-to-br from-blue-100 to-purple-100">
               <img 
-                src="${p.foto}" 
-                alt="${p.nama_lengkap}" 
+                src="${escapeHtml(p.foto)}" 
+                alt="${escapeHtml(p.nama_lengkap)}" 
                 class="w-full h-24 sm:h-28 lg:h-32 object-cover group-hover:scale-110 transition-transform duration-500"
                 loading="lazy"
               />
@@ -1006,19 +994,19 @@
               <!-- Kode Badge -->
               <div class="mb-2 flex items-center justify-center">
                 <span class="bg-gradient-to-r from-primary to-purple-600 text-white px-3 py-1 rounded-full text-xs lg:text-sm font-bold shadow-md">
-                  <i class="fas fa-ticket mr-1"></i>${p.kode}
+                  <i class="fas fa-ticket mr-1"></i>${escapeHtml(p.kode)}
                 </span>
               </div>
               
               <!-- Name -->
-              <h4 class="font-bold text-sm lg:text-base text-gray-800 text-center truncate mb-1 group-hover:text-primary transition-colors" title="${p.nama_lengkap}">
-                ${p.nama_lengkap}
+              <h4 class="font-bold text-sm lg:text-base text-gray-800 text-center truncate mb-1 group-hover:text-primary transition-colors" title="${escapeHtml(p.nama_lengkap)}">
+                ${escapeHtml(p.nama_lengkap)}
               </h4>
               
               <!-- School -->
-              <p class="text-xs text-gray-500 text-center truncate flex items-center justify-center gap-1" title="${p.nama_sekolah || 'Tidak ada sekolah'}">
+              <p class="text-xs text-gray-500 text-center truncate flex items-center justify-center gap-1" title="${escapeHtml(p.nama_sekolah || 'Tidak ada sekolah')}">
                 <i class="fas fa-school"></i>
-                <span class="truncate">${p.nama_sekolah || '-'}</span>
+                <span class="truncate">${escapeHtml(p.nama_sekolah || '-')}</span>
               </p>
               
               <!-- Status Indicator -->

@@ -73,6 +73,63 @@
 </aside>
 
 <script>
+  // Escape teks sebelum dimasukkan ke innerHTML / template HTML (cegah XSS)
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  // Token CSRF otomatis untuk semua fetch() dan form POST di halaman admin
+  (function () {
+    const token = "<%= typeof csrfToken !== 'undefined' ? csrfToken : '' %>";
+    window.CSRF_TOKEN = token;
+
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = function (input, init = {}) {
+      const method = (init.method || "GET").toUpperCase();
+      const url = new URL(typeof input === "string" ? input : input.url, location.href);
+      if (method !== "GET" && method !== "HEAD" && url.origin === location.origin) {
+        const headers = new Headers(init.headers || {});
+        headers.set("X-CSRF-Token", token);
+        init = { ...init, headers };
+      }
+      return originalFetch(input, init);
+    };
+
+    function addTokenToForm(form) {
+      if ((form.method || "").toLowerCase() !== "post") return;
+      let input = form.querySelector('input[name="_csrf"]');
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "_csrf";
+        form.appendChild(input);
+      }
+      input.value = token;
+    }
+
+    // form.submit() via JavaScript tidak memicu event submit, jadi di-patch juga
+    const originalSubmit = HTMLFormElement.prototype.submit;
+    HTMLFormElement.prototype.submit = function () {
+      addTokenToForm(this);
+      return originalSubmit.call(this);
+    };
+    document.addEventListener("submit", (e) => addTokenToForm(e.target), true);
+  })();
+
+  // Logout lewat POST (tidak bisa dipicu dari link luar)
+  function doLogout() {
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = "/admin/logout";
+    document.body.appendChild(form);
+    form.submit();
+  }
+
   // Function untuk konfirmasi logout
   function confirmLogout(event) {
     event.preventDefault();
@@ -116,7 +173,7 @@
           });
 
           // Redirect to logout
-          window.location.href = "/admin/logout";
+          doLogout();
         }
       });
     } else {
@@ -126,7 +183,7 @@
           "Apakah Anda yakin ingin logout?\n\nAnda perlu login kembali untuk mengakses halaman admin."
         )
       ) {
-        window.location.href = "/admin/logout";
+        doLogout();
       }
     }
   }

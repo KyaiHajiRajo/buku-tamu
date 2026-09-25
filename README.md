@@ -79,6 +79,12 @@ Atau manual:
 1. Buka phpMyAdmin atau MySQL client
 2. Import file `database/schema.sql`
 
+Lalu jalankan migrasi (aman diulang, juga untuk database lama):
+
+```bash
+npm run db:migrate
+```
+
 ### 5. Jalankan Aplikasi
 
 **Development mode:**
@@ -101,24 +107,35 @@ Aplikasi akan berjalan di: `http://localhost:1000`
 - **Admin Login:** http://localhost:1000/admin/login
 - **Admin Dashboard:** http://localhost:1000/admin/dashboard
 
-## 👤 Akun Admin Default
+## 👤 Akun Admin
 
-```
-Username: admin
-Password: admin123
-```
-
-⚠️ **PENTING:** Segera ganti password default setelah login pertama kali!
-
-## 🔐 Membuat Admin Baru
-
-Untuk membuat password hash baru:
+Tidak ada akun default. Buat admin pertama (nama, nomor WA, password ditanyakan):
 
 ```bash
-node database/create-admin.js
+npm run seed:admin
 ```
 
-Kemudian gunakan hash yang dihasilkan untuk insert ke tabel `super_admin`.
+Ganti password admin kapan saja (semua sesi login otomatis direset):
+
+```bash
+npm run admin:password
+```
+
+## 🎨 Build CSS
+
+Tampilan memakai Tailwind yang di-build menjadi `public/css/tailwind.css`.
+Setelah mengubah class di file `views/`, jalankan:
+
+```bash
+npm run build:css
+```
+
+## 🛡️ Keamanan & Production
+
+- Isi `SESSION_SECRET` (min. 32 karakter acak) dan `NODE_ENV=production` di `.env`
+- Pakai HTTPS lalu set `COOKIE_SECURE=true`; di belakang nginx/cloudflare set `TRUST_PROXY=1`
+- `WHATSAPP_ENABLED=false` untuk mematikan WhatsApp (hemat RAM ±600 MB)
+- Foto tamu (`public/uploads/`) dan dump database tidak disimpan di git
 
 ## 📁 Struktur Folder
 
@@ -150,7 +167,9 @@ buku-tamu/
 │       └── data-tamu.ejs
 ├── database/
 │   ├── schema.sql          # SQL schema
-│   └── create-admin.js     # Script hash password
+│   ├── migrate.js          # Migrasi index & constraint
+│   ├── seed-admin.js       # Buat admin pertama
+│   └── change-password.js  # Ganti password admin
 └── README.md
 ```
 

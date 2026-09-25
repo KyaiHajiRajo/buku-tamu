@@ -3,4 +3,12 @@ node_modules/
 *.log
 .DS_Store
 .wwebjs_auth/
+.wwebjs_cache/
 
+# Foto tamu = data pribadi, jangan masuk git
+public/uploads/*
+!public/uploads/.gitkeep
+
+# Dump database berisi data asli
+buku_tamu.sql
+*.sql.gz

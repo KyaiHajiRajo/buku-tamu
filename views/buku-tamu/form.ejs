@@ -6,21 +6,8 @@
     <title><%= title %></title>
 
     <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/css/tailwind.css" />
 
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              primary: "#6184D6",
-              "primary-dark": "#4B6BB5",
-              "primary-light": "#8AA5E8",
-            },
-          },
-        },
-      };
-    </script>
 
     <link
       rel="stylesheet"
@@ -630,9 +617,10 @@
       captureBtn.addEventListener("click", function () {
         const context = canvas.getContext("2d");
 
-        // Set canvas size to video size
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // Perkecil foto (maks 800px) agar upload cepat & hemat penyimpanan
+        const scale = Math.min(1, 800 / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
 
         // Draw video frame to canvas
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
